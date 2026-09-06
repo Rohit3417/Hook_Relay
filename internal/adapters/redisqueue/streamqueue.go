@@ -99,6 +99,7 @@ func (q Client) ReadPending(ctx context.Context, group string, consumer string, 
 		Consumer: consumer,
 		Streams:  []string{IngressStream, ">"}, //reading new, unclaimed messages uses ">" as the special ID.
 		Count:    count,
+		Block:    2 * time.Second,
 	}).Result()
 
 	if err == redis.Nil {
