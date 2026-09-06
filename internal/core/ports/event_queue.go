@@ -18,7 +18,7 @@ type EventQueue interface {
 	ReadPending(ctx context.Context, group string, consumer string, count int) ([]QueuedEvents, error)
 
 	//Ack acknowlegdes successful processing of message, removing it from consumers group's pending entries list(PEL)
-	Ack(ctx context.Context, messageID string, group string) error
+	Ack(ctx context.Context, group string, messageID string) error
 
 	//ReclaimStale reassigns messages that have been pending
 	//if any work is idle for too long, it means the worker must have been crashed, so redis reassigns it.
