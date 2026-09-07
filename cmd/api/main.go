@@ -38,11 +38,17 @@ func main() {
 	}
 	defer client.Close()
 
-	h := handler.NewHandler(pool, client)
+	queue := redisqueue.NewClient(client)
+	if err := queue.EnsureGroup(ctx, "dispatcher_group"); err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	h := handler.NewHandler(pool, client, queue)
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Route("/", func(r chi.Router) {
 		r.Get("/healthz", h.Healthz)
+		r.Post("/api/v1/publish", h.Publish)
 	})
 
 	port := os.Getenv("PORT")
