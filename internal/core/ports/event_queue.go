@@ -15,7 +15,7 @@ type EventQueue interface {
 
 	// Read new pending events that needs to be processed
 	//Redis needs to know who the group and consumer is so that it does not assign same work to 2 workers
-	ReadPending(ctx context.Context, group string, consumer string, count int) ([]QueuedEvents, error)
+	ReadPending(ctx context.Context, group string, consumer string, count int64) ([]QueuedEvents, error)
 
 	//Ack acknowlegdes successful processing of message, removing it from consumers group's pending entries list(PEL)
 	Ack(ctx context.Context, group string, messageID string) error
