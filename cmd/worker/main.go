@@ -3,6 +3,7 @@ package main
 import (
 	"Hook_Relay2/internal/adapters/redisqueue"
 	"Hook_Relay2/internal/adapters/storage"
+	"Hook_Relay2/internal/core/ports"
 	"context"
 	"fmt"
 	"log"
@@ -16,6 +17,20 @@ const (
 	consumerGroup = "dispatcher_group"
 	batchSize     = 10
 )
+
+func handle(ctx context.Context, queue redisqueue.Client, group string, event ports.QueuedEvents) {
+
+	// The failure condition or the condition for which we increase attempts count :
+	// Without an actual outbound HTTP call to a destination server,
+	// nothing in your system can genuinely fail during delivery — there's no destination to reject the request,
+	// no network error, no timeout.
+	err := queue.Ack(ctx, group, event.MessageID)
+	if err != nil {
+		log.Printf("error occured in acknowledging: %v\n", err)
+		return
+	}
+	log.Println("Hello")
+}
 
 func main() {
 	err := godotenv.Load()
@@ -62,7 +77,7 @@ func main() {
 		}
 
 		for _, event := range events {
-			//handle(event)
+			handle(loopCtx, queue, consumerGroup, event)
 		}
 	}
 
