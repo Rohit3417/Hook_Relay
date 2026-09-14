@@ -38,8 +38,7 @@ func main() {
 		log.Printf("No .env found")
 	}
 
-	startupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	startupCtx := context.Background()
 
 	pool, err := storage.NewPool(startupCtx)
 	if err != nil {
@@ -69,16 +68,42 @@ func main() {
 
 	//We cannot set timeout for this ctx as we require it in ReadPending function which runs forever
 	loopCtx := context.Background()
+
+	go func() {
+		for {
+			// only reclaim things that have been stuck for a genuinely long time (30s)
+			events, err := queue.ReclaimStale(loopCtx, consumerGroup, consumerName, 30*time.Second)
+			if err != nil {
+				log.Printf("error occured: %v\n", err)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			for _, event := range events {
+				handle(loopCtx, queue, consumerGroup, event)
+			}
+
+			// Check every 5 second for stale events
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
 	for {
+
+		// The ReadPending auto takes 2 second before calling on again
+		//This controls how long one blocking read waits before returning empty
 		events, err := queue.ReadPending(loopCtx, consumerGroup, consumerName, batchSize)
 		if err != nil {
 			log.Printf("read pending failed: %v", err)
+
 			time.Sleep(1 * time.Second)
+			continue
 		}
 
 		for _, event := range events {
 			handle(loopCtx, queue, consumerGroup, event)
 		}
+
 	}
 
 }
