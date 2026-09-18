@@ -1,4 +1,4 @@
-package main
+package signer
 
 import (
 	"crypto/hmac"
@@ -25,7 +25,7 @@ func Sign(payload []byte, secret string) string {
 	return fmt.Sprintf("t=%d,v1=%s", currTime, signature)
 }
 
-func Verify(payload []byte, header string, secret string) error {
+func Verify(payload []byte, header string, secret string, tolerance time.Duration) error {
 	parts := strings.Split(header, ",")
 	if len(parts) != 2 {
 		return errors.New("invalid header format")
@@ -48,6 +48,17 @@ func Verify(payload []byte, header string, secret string) error {
 	timestamp, err := strconv.ParseInt(timeStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("parsing timestamp: %w", err)
+	}
+
+	// 1. Check if the signature has expired
+	now := time.Now().Unix()
+	if now-timestamp > int64(tolerance.Seconds()) {
+		return errors.New("signature expired: timestamp is too old")
+	}
+
+	// 2. Prevent future timestamps (allowing a 5-second buffer for clock drift)
+	if timestamp-now > 5 {
+		return errors.New("invalid timestamp: time is in the future")
 	}
 
 	mac := hmac.New(sha256.New, []byte(secret))
