@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// Use of IsBlockedIp
 func MakeCall(network, address string, c syscall.RawConn) error {
 	//address arrives as "ip:port"
 	//So we split
@@ -28,16 +29,21 @@ func MakeCall(network, address string, c syscall.RawConn) error {
 	return nil
 }
 
+// Creating a http client with the dialer rejecting blocked IP's
 func NewSecureClient() *http.Client {
+
+	// This timeout is for TCP connection
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
 		Control: MakeCall,
 	}
 
+	//whenever you need to open a new connection, use this dialer instead of the default one"
 	transport := &http.Transport{
 		DialContext: dialer.DialContext,
 	}
 
+	//client.Timeout bounds the entire request — connection, sending the request, waiting for the response, reading the body, all of it combined.
 	client := &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: transport,
