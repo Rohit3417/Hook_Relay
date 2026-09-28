@@ -1,0 +1,26 @@
+SSRF :
+
+
+
+
+Backoff and Jitter :
+suppose our server is temperorily down for some reason and all the requests at that time are queued 
+When server starts all requests are triggered at the same time time to avoid this we use jitter formula 
+which exponentially increases time of retrying and the randomness is so that evey client gets a different time
+
+Only retry on error 500 503 timeout
+
+Circuit Breaker concept :
+if a destination server fails continuously (the guide says 50 consecutive failures),
+stop sending it traffic entirely for a while — trip to PAUSED/open state. 
+This protects two things: your own worker pool (stop burning goroutines/connections retrying something clearly dead)
+and the destination server itself (stop hammering a service that might be down for maintenance and recovering).
+Closed — normal operation, requests flow through. On repeated failures, trips to Open.
+
+Open — requests are rejected immediately, without even attempting the call — 
+       this is the whole point, avoiding wasted work on something known-broken. 
+       After some cooldown period passes, transitions to Half-Open.
+
+Half-Open — allows exactly one (or a small number of) trial request through. 
+            If it succeeds, transitions back to Closed (recovered). 
+            If it fails, goes back to Open (still broken, reset the cooldown).
