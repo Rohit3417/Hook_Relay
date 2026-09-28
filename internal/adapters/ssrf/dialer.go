@@ -43,7 +43,8 @@ func NewSecureClient() *http.Client {
 		DialContext: dialer.DialContext,
 	}
 
-	//client.Timeout bounds the entire request — connection, sending the request, waiting for the response, reading the body, all of it combined.
+	//client.Timeout bounds the entire request — connection, sending the request,
+	// waiting for the response, reading the body, all of it combined.
 	client := &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: transport,
