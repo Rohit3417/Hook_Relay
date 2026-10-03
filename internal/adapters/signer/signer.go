@@ -52,7 +52,7 @@ func Verify(payload []byte, header string, secret string, tolerance time.Duratio
 
 	// 1. Check if the signature has expired
 	now := time.Now().Unix()
-	if now-timestamp > int64(tolerance.Seconds()) {
+	if time.Duration(now-timestamp) > tolerance {
 		return errors.New("signature expired: timestamp is too old")
 	}
 
