@@ -1,4 +1,4 @@
-package circuitbreaker
+package circuitBreaker
 
 import (
 	"sync"
@@ -49,8 +49,8 @@ func (b *Breaker) Allow(endpointID string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.endpoints[endpointID] = b.getOrCreate(endpointID)
-	currState := b.endpoints[endpointID].state
+	rec := b.getOrCreate(endpointID)
+	currState := rec.state
 
 	switch currState {
 	case Closed:
@@ -58,8 +58,8 @@ func (b *Breaker) Allow(endpointID string) bool {
 	case Open:
 		if b.now().Sub(b.endpoints[endpointID].openedAt) >= b.cooldown {
 
-			b.endpoints[endpointID].state = HalfOpen
-			b.endpoints[endpointID].trialInFlight = true
+			rec.state = HalfOpen
+			rec.trialInFlight = true
 			return true
 		} else {
 			return false
@@ -73,25 +73,25 @@ func (b *Breaker) RecordResult(endpointID string, success bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.endpoints[endpointID] = b.getOrCreate(endpointID)
-	currState := b.endpoints[endpointID].state
+	rec := b.getOrCreate(endpointID)
+	currState := rec.state
 
 	if success && currState == Closed {
-		b.endpoints[endpointID].consecutiveFailures = 0
+		rec.consecutiveFailures = 0
 	} else if !success && currState == Closed {
-		b.endpoints[endpointID].consecutiveFailures++
-		if b.endpoints[endpointID].consecutiveFailures >= b.failureThreshold {
-			b.endpoints[endpointID].state = Open
-			b.endpoints[endpointID].openedAt = b.now()
+		rec.consecutiveFailures++
+		if rec.consecutiveFailures >= b.failureThreshold {
+			rec.state = Open
+			rec.openedAt = b.now()
 		}
 
 	} else if success && currState == HalfOpen {
-		b.endpoints[endpointID].state = Closed
-		b.endpoints[endpointID].consecutiveFailures = 0
-		b.endpoints[endpointID].trialInFlight = false
+		rec.state = Closed
+		rec.consecutiveFailures = 0
+		rec.trialInFlight = false
 	} else if !success && currState == HalfOpen {
-		b.endpoints[endpointID].state = Open
-		b.endpoints[endpointID].openedAt = b.now()
+		rec.state = Open
+		rec.openedAt = b.now()
 	}
 
 }
