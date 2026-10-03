@@ -5,8 +5,14 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type Endpoint struct {
+	URL    string
+	Secret string
+}
 
 func NewPool(ctx context.Context) (*pgxpool.Pool, error) {
 	dsn := fmt.Sprintf(
@@ -26,4 +32,20 @@ func NewPool(ctx context.Context) (*pgxpool.Pool, error) {
 	}
 
 	return pool, nil
+}
+
+func GetEndpoint(ctx context.Context, pool *pgxpool.Pool, endpointID string) (Endpoint, error) {
+
+	var temp Endpoint
+	err := pool.QueryRow(ctx, "SELECT url, secret from endpoints where id = $1", endpointID).Scan(&temp.URL, &temp.Secret)
+
+	if err == pgx.ErrNoRows {
+		return Endpoint{}, fmt.Errorf("endpoint %s not found %w", endpointID, err)
+	}
+	if err != nil {
+		return Endpoint{}, fmt.Errorf("lookup endpoint %s: %w", endpointID, err)
+	}
+
+	return temp, nil
+
 }
