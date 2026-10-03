@@ -1,0 +1,30 @@
+# GraphQL schema example
+#
+# https://gqlgen.com/getting-started/
+
+# Ch. 6's whole point: GraphQL's advantage is letting a client ask for a tenant and its endpoints 
+# and each endpoint's attempts in a single nested query, instead of separate round trips
+
+type Tenant {
+  id: ID!
+  name: String!
+  tier: String!
+  endpoints: [Endpoint!]!   #Represents that the items inside endpoint are non-null
+}
+
+type Endpoint {
+  id: ID!
+  tenant: Tenant!           #Represents that the items inside endpoint can be null
+  url: String!
+}
+
+type Attempt {
+  id: ID!
+  eventIid: ID!
+  attemptNumber: Int!
+}
+
+type Query {
+  tenant(id: ID!): Tenant
+  endpoints(tenantId: ID!): [Endpoint!]!    
+}
