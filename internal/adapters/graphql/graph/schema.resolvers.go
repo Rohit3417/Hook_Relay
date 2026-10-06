@@ -8,24 +8,247 @@ package graph
 import (
 	"Hook_Relay2/internal/adapters/graphql/graph/model"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
-// Tenant is the resolver for the tenant field.
-func (r *queryResolver) Tenant(ctx context.Context, id string) (*model.Tenant, error) {
-	// panic(fmt.Errorf("not implemented: Tenant - tenant"))
+type tenantIDKey string
 
+func helper(ctx context.Context) (string, error) {
+	id, ok := ctx.Value("tenantID").(string)
+	if !ok {
+		return "", fmt.Errorf("unauthorized: missing or invalid tenant context")
+	}
+
+	return id, nil
 }
 
-// Endpoints is the resolver for the endpoints field.
-func (r *queryResolver) Endpoints(ctx context.Context, tenantID string) ([]*model.Endpoint, error) {
-	panic(fmt.Errorf("not implemented: Endpoints - endpoints"))
+// CreateEndpoint is the resolver for the createEndpoint field.
+func (r *mutationResolver) CreateEndpoint(ctx context.Context, input model.CreateEndpointInput) (*model.CreateEndpointPayload, error) {
+	// panic(fmt.Errorf("not implemented: CreateEndpoint - createEndpoint"))
+
+	tenantID, err := helper(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate a secret string and id will auto generate by our supabase
+	bytes := make([]byte, 32) // 256 bit secret
+	if _, err := rand.Read(bytes); err != nil {
+		return nil, fmt.Errorf("failed to generate webhook secret: %w", err)
+	}
+
+	secret := hex.EncodeToString(bytes)
+
+	var id string
+	var created_at time.Time
+	// Execute insertion of this endpoint into endpoints table
+	err = r.Pool.QueryRow(ctx, "INSERT INTO endpoints (tenant_id, url, secret) values ($1, $2, $3) returning id, created_at", tenantID, input.URL, secret).Scan(&id, &created_at)
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert endpoint for tenant %s: %w", tenantID, err)
+	}
+	endpointPayload := model.CreateEndpointPayload{
+		Endpoint: &model.Endpoint{
+			ID:        id,
+			URL:       input.URL,
+			Status:    model.EndpointStatusActive,
+			CreatedAt: created_at,
+		},
+	}
+
+	return &endpointPayload, nil
 }
+
+// PauseEndpoint is the resolver for the pauseEndpoint field.
+func (r *mutationResolver) PauseEndpoint(ctx context.Context, id string) (*model.EndpointStatusPayload, error) {
+	// panic(fmt.Errorf("not implemented: PauseEndpoint - pauseEndpoint"))
+
+	tenantID, err := helper(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	isActive := false
+
+	commandTag, err := r.Pool.Exec(ctx, "UPDATE endpoints SET is_active = $1 WHERE id = $2 AND tenant_id = $3", isActive, id, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pause endpoint %s: %w", id, err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return nil, fmt.Errorf("endpoint not found")
+	}
+
+	// This is done becaus normal way has endpointPayload.Endpoint is likely of type *model.Endpoint
+	// hat Endpoint pointer initializes to nil. Attempting to execute endpointPayload.Endpoint.ID = id
+	// will instantly crash your server with a nil pointer dereference.
+	endpointPayload := model.EndpointStatusPayload{
+		Endpoint: &model.Endpoint{
+			ID:     id,
+			Status: model.EndpointStatusPaused,
+		},
+	}
+
+	return &endpointPayload, nil
+}
+
+// ResumeEndpoint is the resolver for the resumeEndpoint field.
+func (r *mutationResolver) ResumeEndpoint(ctx context.Context, id string) (*model.EndpointStatusPayload, error) {
+	// panic(fmt.Errorf("not implemented: ResumeEndpoint - resumeEndpoint"))
+
+	tenantID, err := helper(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	isActive := true
+
+	commandTag, err := r.Pool.Exec(ctx, "UPDATE endpoints SET is_active = $1 WHERE id = $2 AND tenant_id = $3", isActive, id, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pause endpoint %s: %w", id, err)
+	}
+	if commandTag.RowsAffected() == 0 {
+		return nil, fmt.Errorf("endpoint not found")
+	}
+
+	// This is done becaus normal way has endpointPayload.Endpoint is likely of type *model.Endpoint
+	// hat Endpoint pointer initializes to nil. Attempting to execute endpointPayload.Endpoint.ID = id
+	// will instantly crash your server with a nil pointer dereference.
+	endpointPayload := model.EndpointStatusPayload{
+		Endpoint: &model.Endpoint{
+			ID:     id,
+			Status: model.EndpointStatusActive,
+		},
+	}
+
+	return &endpointPayload, nil
+}
+
+// Me is the resolver for the me field. fetching a single row
+func (r *queryResolver) Me(ctx context.Context) (*model.Tenant, error) {
+	// panic(fmt.Errorf("not implemented: Me - me"))
+	id, err := helper(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var tenant model.Tenant
+	tenant.ID = id
+	err = r.Pool.QueryRow(ctx, "SELECT name, tier FROM tenants WHERE id = $1", id).Scan(&tenant.Name, &tenant.Tier)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("tenant profile not found for id: %s\n", id)
+			return nil, nil
+		} else {
+			return nil, fmt.Errorf("failed to parse endpoint record: %w", err)
+		}
+	}
+
+	return &tenant, nil
+}
+
+// Endpoints is the resolver for the endpoints field. fetching multiple rows
+// Not the final resolver that's why some fields remain unpopulated
+func (r *queryResolver) Endpoints(ctx context.Context) ([]*model.Endpoint, error) {
+	// panic(fmt.Errorf("not implemented: Endpoints - endpoints"))
+	tenantID, err := helper(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var endpoints []*model.Endpoint
+	rows, err := r.Pool.Query(ctx, "SELECT id, url, is_active, created_at from endpoints where tenant_id = $1", tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch endpoints for tenant %s: %w", tenantID, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var endpoint model.Endpoint
+		var isActive bool
+		err = rows.Scan(&endpoint.ID, &endpoint.URL, &isActive, &endpoint.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse endpoint record: %w", err)
+		}
+
+		if isActive {
+			endpoint.Status = model.EndpointStatusActive
+		} else {
+			endpoint.Status = model.EndpointStatusPaused
+		}
+
+		endpoints = append(endpoints, &endpoint)
+	}
+
+	// To catch network drops that quietly terminate loop early
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("interrupted while streaming endpoints: %w", err)
+	}
+
+	return endpoints, nil
+}
+
+// Endpoint is the resolver for the endpoint field. Also not the final resolver
+func (r *queryResolver) Endpoint(ctx context.Context, id string) (*model.Endpoint, error) {
+	// panic(fmt.Errorf("not implemented: Endpoint - endpoint"))
+	tenantID, err := helper(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var endpoint model.Endpoint
+	var isActive bool
+	endpoint.ID = id
+	err = r.Pool.QueryRow(ctx, "SELECT url, is_active, created_at from endpoints where id = $1 AND tenant_id = $2", id, tenantID).Scan(&endpoint.URL, &isActive, &endpoint.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			log.Println("no row found")
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch endpoints for tenant %s: %w", tenantID, err)
+	}
+	if isActive {
+		endpoint.Status = model.EndpointStatusActive
+	} else {
+		endpoint.Status = model.EndpointStatusPaused
+	}
+	return &endpoint, nil
+}
+
+// Metrics is the resolver for the metrics field.
+func (r *queryResolver) Metrics(ctx context.Context, rangeArg model.TimeRange) (*model.Metrics, error) {
+	panic(fmt.Errorf("not implemented: Metrics - metrics"))
+}
+
+// Billing is the resolver for the billing field.
+func (r *queryResolver) Billing(ctx context.Context) (*model.Billing, error) {
+	panic(fmt.Errorf("not implemented: Billing - billing"))
+}
+
+// DeliveryAttempts is the resolver for the deliveryAttempts field.
+func (r *subscriptionResolver) DeliveryAttempts(ctx context.Context, endpointID *string) (<-chan *model.Attempt, error) {
+	panic(fmt.Errorf("not implemented: DeliveryAttempts - deliveryAttempts"))
+}
+
+// Mutation returns MutationResolver implementation.
+func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
 
 // Query returns QueryResolver implementation.
 func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
 
-type queryResolver struct{ *Resolver }
+// Subscription returns SubscriptionResolver implementation.
+func (r *Resolver) Subscription() SubscriptionResolver { return &subscriptionResolver{r} }
+
+type (
+	mutationResolver     struct{ *Resolver }
+	queryResolver        struct{ *Resolver }
+	subscriptionResolver struct{ *Resolver }
+)
 
 // !!! WARNING !!!
 // The code below was going to be deleted when updating resolvers. It has been copied here so you have
@@ -34,15 +257,20 @@ type queryResolver struct{ *Resolver }
 //    it when you're done.
 //  - You have helper methods in this file. Move them out to keep these resolver files clean.
 /*
-	func (r *mutationResolver) CreateTodo(ctx context.Context, input model.NewTodo) (*model.Todo, error) {
-	panic(fmt.Errorf("not implemented: CreateTodo - createTodo"))
+	func (r *endpointResolver) Tenant(ctx context.Context, obj *model.Endpoint) (*model.Tenant, error) {
+	panic(fmt.Errorf("not implemented: Tenant - tenant"))
 }
-func (r *queryResolver) Todos(ctx context.Context) ([]*model.Todo, error) {
-	panic(fmt.Errorf("not implemented: Todos - todos"))
+func (r *queryResolver) Tenant(ctx context.Context, id string) (*model.Tenant, error) {
+	panic(fmt.Errorf("not implemented: Tenant - tenant"))
 }
-func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
+func (r *tenantResolver) Endpoints(ctx context.Context, obj *model.Tenant) ([]*model.Endpoint, error) {
+	panic(fmt.Errorf("not implemented: Endpoints - endpoints"))
+}
+func (r *Resolver) Endpoint() EndpointResolver { return &endpointResolver{r} }
+func (r *Resolver) Tenant() TenantResolver { return &tenantResolver{r} }
 type (
-	mutationResolver struct{ *Resolver }
+	endpointResolver struct{ *Resolver }
 	queryResolver    struct{ *Resolver }
+	tenantResolver   struct{ *Resolver }
 )
 */

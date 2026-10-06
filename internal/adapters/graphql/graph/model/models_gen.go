@@ -2,24 +2,266 @@
 
 package model
 
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"strconv"
+	"time"
+)
+
 type Attempt struct {
-	ID            string `json:"id"`
-	EventIid      string `json:"eventIid"`
-	AttemptNumber int32  `json:"attemptNumber"`
+	ID            string        `json:"id"`
+	EventID       string        `json:"eventId"`
+	EndpointID    string        `json:"endpointId"`
+	AttemptNumber int32         `json:"attemptNumber"`
+	Status        AttemptStatus `json:"status"`
+	ResponseCode  *int32        `json:"responseCode,omitempty"`
+	DurationMs    int32         `json:"durationMs"`
+	Error         *string       `json:"error,omitempty"`
+	CreatedAt     time.Time     `json:"createdAt"`
+}
+
+type AttemptConnection struct {
+	Edges    []*AttemptEdge `json:"edges"`
+	PageInfo *PageInfo      `json:"pageInfo"`
+}
+
+type AttemptEdge struct {
+	Cursor string   `json:"cursor"`
+	Node   *Attempt `json:"node"`
+}
+
+type Billing struct {
+	Tier        Tier      `json:"tier"`
+	PeriodStart time.Time `json:"periodStart"`
+	PeriodEnd   time.Time `json:"periodEnd"`
+	EventsUsed  int32     `json:"eventsUsed"`
+	EventsQuota int32     `json:"eventsQuota"`
+}
+
+type CreateEndpointInput struct {
+	URL string `json:"url"`
+}
+
+type CreateEndpointPayload struct {
+	Endpoint *Endpoint `json:"endpoint"`
 }
 
 type Endpoint struct {
-	ID     string  `json:"id"`
-	Tenant *Tenant `json:"tenant"`
-	URL    string  `json:"url"`
+	ID        string             `json:"id"`
+	URL       string             `json:"url"`
+	Status    EndpointStatus     `json:"status"`
+	CreatedAt time.Time          `json:"createdAt"`
+	Stats     *EndpointStats     `json:"stats"`
+	Attempts  *AttemptConnection `json:"attempts"`
+}
+
+type EndpointStats struct {
+	TotalDeliveries int32      `json:"totalDeliveries"`
+	SuccessRate     float64    `json:"successRate"`
+	AvgLatencyMs    float64    `json:"avgLatencyMs"`
+	LastDeliveryAt  *time.Time `json:"lastDeliveryAt,omitempty"`
+}
+
+type EndpointStatusPayload struct {
+	Endpoint *Endpoint `json:"endpoint"`
+}
+
+type Metrics struct {
+	EventsIngested      int32 `json:"eventsIngested"`
+	DeliveriesSucceeded int32 `json:"deliveriesSucceeded"`
+	DeliveriesFailed    int32 `json:"deliveriesFailed"`
+}
+
+type Mutation struct {
+}
+
+type PageInfo struct {
+	HasNextPage bool    `json:"hasNextPage"`
+	EndCursor   *string `json:"endCursor,omitempty"`
 }
 
 type Query struct {
 }
 
+type Subscription struct {
+}
+
 type Tenant struct {
-	ID        string      `json:"id"`
-	Name      string      `json:"name"`
-	Tier      string      `json:"tier"`
-	Endpoints []*Endpoint `json:"endpoints"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Tier Tier   `json:"tier"`
+}
+
+type TimeRange struct {
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+}
+
+type AttemptStatus string
+
+const (
+	AttemptStatusSuccess AttemptStatus = "SUCCESS"
+	AttemptStatusFailed  AttemptStatus = "FAILED"
+)
+
+var AllAttemptStatus = []AttemptStatus{
+	AttemptStatusSuccess,
+	AttemptStatusFailed,
+}
+
+func (e AttemptStatus) IsValid() bool {
+	switch e {
+	case AttemptStatusSuccess, AttemptStatusFailed:
+		return true
+	}
+	return false
+}
+
+func (e AttemptStatus) String() string {
+	return string(e)
+}
+
+func (e *AttemptStatus) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = AttemptStatus(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid AttemptStatus", str)
+	}
+	return nil
+}
+
+func (e AttemptStatus) MarshalGQL(w io.Writer) {
+	_, _ = fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *AttemptStatus) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e AttemptStatus) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type EndpointStatus string
+
+const (
+	EndpointStatusActive EndpointStatus = "ACTIVE"
+	EndpointStatusPaused EndpointStatus = "PAUSED"
+)
+
+var AllEndpointStatus = []EndpointStatus{
+	EndpointStatusActive,
+	EndpointStatusPaused,
+}
+
+func (e EndpointStatus) IsValid() bool {
+	switch e {
+	case EndpointStatusActive, EndpointStatusPaused:
+		return true
+	}
+	return false
+}
+
+func (e EndpointStatus) String() string {
+	return string(e)
+}
+
+func (e *EndpointStatus) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = EndpointStatus(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid EndpointStatus", str)
+	}
+	return nil
+}
+
+func (e EndpointStatus) MarshalGQL(w io.Writer) {
+	_, _ = fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *EndpointStatus) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e EndpointStatus) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type Tier string
+
+const (
+	TierFree       Tier = "FREE"
+	TierPro        Tier = "PRO"
+	TierEnterprise Tier = "ENTERPRISE"
+)
+
+var AllTier = []Tier{
+	TierFree,
+	TierPro,
+	TierEnterprise,
+}
+
+func (e Tier) IsValid() bool {
+	switch e {
+	case TierFree, TierPro, TierEnterprise:
+		return true
+	}
+	return false
+}
+
+func (e Tier) String() string {
+	return string(e)
+}
+
+func (e *Tier) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = Tier(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid Tier", str)
+	}
+	return nil
+}
+
+func (e Tier) MarshalGQL(w io.Writer) {
+	_, _ = fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *Tier) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e Tier) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
 }

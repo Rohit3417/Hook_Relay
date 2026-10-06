@@ -197,3 +197,11 @@ models:
     model:
       - github.com/99designs/gqlgen/graphql.Int
       - github.com/99designs/gqlgen/graphql.Int64
+  Tenant:
+    fields:
+      endpoints:
+        resolver: true
+  Endpoint:
+    fields:
+      tenant:
+        resolver: true
