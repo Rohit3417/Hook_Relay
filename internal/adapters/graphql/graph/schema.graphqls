@@ -109,6 +109,7 @@ input CreateEndpointInput {
 
 type CreateEndpointPayload {
   endpoint: Endpoint!
+  secret: String!
 }
 
 type EndpointStatusPayload {

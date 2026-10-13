@@ -46,6 +46,7 @@ type CreateEndpointInput struct {
 
 type CreateEndpointPayload struct {
 	Endpoint *Endpoint `json:"endpoint"`
+	Secret   string    `json:"secret"`
 }
 
 type Endpoint struct {

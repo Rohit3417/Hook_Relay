@@ -71,6 +71,7 @@ type ComplexityRoot struct {
 
 	CreateEndpointPayload struct {
 		Endpoint func(childComplexity int) int
+		Secret   func(childComplexity int) int
 	}
 
 	Endpoint struct {
@@ -285,6 +286,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.CreateEndpointPayload.Endpoint(childComplexity), true
+	case "CreateEndpointPayload.secret":
+		if e.ComplexityRoot.CreateEndpointPayload.Secret == nil {
+			break
+		}
+
+		return e.ComplexityRoot.CreateEndpointPayload.Secret(childComplexity), true
 
 	case "Endpoint.attempts":
 		if e.ComplexityRoot.Endpoint.Attempts == nil {
@@ -684,6 +691,8 @@ func (ec *executionContext) childFields_CreateEndpointPayload(ctx context.Contex
 	switch field.Name {
 	case "endpoint":
 		return ec.fieldContext_CreateEndpointPayload_endpoint(ctx, field)
+	case "secret":
+		return ec.fieldContext_CreateEndpointPayload_secret(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type CreateEndpointPayload", field.Name)
 }
@@ -1529,6 +1538,29 @@ func (ec *executionContext) fieldContext_CreateEndpointPayload_endpoint(_ contex
 		},
 	}
 	return fc, nil
+}
+
+func (ec *executionContext) _CreateEndpointPayload_secret(ctx context.Context, field graphql.CollectedField, obj *model.CreateEndpointPayload) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_CreateEndpointPayload_secret(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Secret, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_CreateEndpointPayload_secret(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("CreateEndpointPayload", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
 func (ec *executionContext) _Endpoint_id(ctx context.Context, field graphql.CollectedField, obj *model.Endpoint) (ret graphql.Marshaler) {
@@ -3812,6 +3844,11 @@ func (ec *executionContext) _CreateEndpointPayload(ctx context.Context, sel ast.
 			out.Values[i] = graphql.MarshalString("CreateEndpointPayload")
 		case "endpoint":
 			out.Values[i] = ec._CreateEndpointPayload_endpoint(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "secret":
+			out.Values[i] = ec._CreateEndpointPayload_secret(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

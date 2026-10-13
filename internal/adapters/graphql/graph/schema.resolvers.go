@@ -15,15 +15,15 @@ import (
 	"log"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	pgx "github.com/jackc/pgx/v5"
 )
 
-type tenantIDKey string
+const contextKey = "tenant_id"
 
 func helper(ctx context.Context) (string, error) {
-	id, ok := ctx.Value("tenantID").(string)
+	id, ok := ctx.Value(contextKey).(string)
 	if !ok {
-		return "", fmt.Errorf("unauthorized: missing or invalid tenant context")
+		return "", fmt.Errorf("authentication required")
 	}
 
 	return id, nil
@@ -54,6 +54,7 @@ func (r *mutationResolver) CreateEndpoint(ctx context.Context, input model.Creat
 		return nil, fmt.Errorf("failed to insert endpoint for tenant %s: %w", tenantID, err)
 	}
 	endpointPayload := model.CreateEndpointPayload{
+		Secret: secret,
 		Endpoint: &model.Endpoint{
 			ID:        id,
 			URL:       input.URL,
@@ -110,7 +111,7 @@ func (r *mutationResolver) ResumeEndpoint(ctx context.Context, id string) (*mode
 
 	commandTag, err := r.Pool.Exec(ctx, "UPDATE endpoints SET is_active = $1 WHERE id = $2 AND tenant_id = $3", isActive, id, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to pause endpoint %s: %w", id, err)
+		return nil, fmt.Errorf("failed to resume endpoint %s: %w", id, err)
 	}
 	if commandTag.RowsAffected() == 0 {
 		return nil, fmt.Errorf("endpoint not found")
@@ -233,6 +234,30 @@ func (r *queryResolver) Billing(ctx context.Context) (*model.Billing, error) {
 // DeliveryAttempts is the resolver for the deliveryAttempts field.
 func (r *subscriptionResolver) DeliveryAttempts(ctx context.Context, endpointID *string) (<-chan *model.Attempt, error) {
 	panic(fmt.Errorf("not implemented: DeliveryAttempts - deliveryAttempts"))
+	/*tenant_id, err := helper(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unauthorized")
+	}
+
+	ch := make(chan *model.Attempt, 1)
+
+	go func ()  {
+		// cleanup to gurantee it runs when go routine exits
+		defer close(ch)
+
+		for {
+			select {
+			case <-ctx.Done():
+				// the client disconnected exit loop (e.g. browser closed)
+				return
+
+			default:
+				// block and wait for new redis message
+
+			}
+
+		}
+	}*/
 }
 
 // Mutation returns MutationResolver implementation.
@@ -255,22 +280,3 @@ type (
 // one last chance to move it out of harms way if you want. There are two reasons this happens:
 //  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
 //    it when you're done.
-//  - You have helper methods in this file. Move them out to keep these resolver files clean.
-/*
-	func (r *endpointResolver) Tenant(ctx context.Context, obj *model.Endpoint) (*model.Tenant, error) {
-	panic(fmt.Errorf("not implemented: Tenant - tenant"))
-}
-func (r *queryResolver) Tenant(ctx context.Context, id string) (*model.Tenant, error) {
-	panic(fmt.Errorf("not implemented: Tenant - tenant"))
-}
-func (r *tenantResolver) Endpoints(ctx context.Context, obj *model.Tenant) ([]*model.Endpoint, error) {
-	panic(fmt.Errorf("not implemented: Endpoints - endpoints"))
-}
-func (r *Resolver) Endpoint() EndpointResolver { return &endpointResolver{r} }
-func (r *Resolver) Tenant() TenantResolver { return &tenantResolver{r} }
-type (
-	endpointResolver struct{ *Resolver }
-	queryResolver    struct{ *Resolver }
-	tenantResolver   struct{ *Resolver }
-)
-*/
