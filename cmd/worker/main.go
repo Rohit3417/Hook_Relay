@@ -114,11 +114,11 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 	deliveryInfo.AttemptNo = attemptCount
 	deliveryInfo.Duration = latency
 	if reqErr != nil {
-		deliveryInfo.ErrMsg = err.Error()
+		deliveryInfo.ErrMsg = reqErr.Error()
 		deliveryInfo.Success = false
 		deliveryInfo.HTTPStatus = 0
 		_ = storage.RecordAttempt(ctx, pool, deliveryInfo)
-		log.Printf("delivery request failed for event %s: %v", event.Event.ID, err)
+		log.Printf("delivery request failed for event %s: %v", event.Event.ID, reqErr)
 		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount)
 		return
 	}
