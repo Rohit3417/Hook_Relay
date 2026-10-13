@@ -10,8 +10,10 @@ import (
 )
 
 type Endpoint struct {
-	URL    string
-	Secret string
+	URL      string
+	Secret   string
+	TenantID string
+	IsActive bool
 }
 
 func NewPool(ctx context.Context) (*pgxpool.Pool, error) {
@@ -37,7 +39,7 @@ func NewPool(ctx context.Context) (*pgxpool.Pool, error) {
 func GetEndpoint(ctx context.Context, pool *pgxpool.Pool, endpointID string) (Endpoint, error) {
 
 	var temp Endpoint
-	err := pool.QueryRow(ctx, "SELECT url, secret from endpoints where id = $1", endpointID).Scan(&temp.URL, &temp.Secret)
+	err := pool.QueryRow(ctx, "SELECT url, secret, tenant_id, is_active from endpoints where id = $1", endpointID).Scan(&temp.URL, &temp.Secret, &temp.TenantID, &temp.IsActive)
 
 	if err == pgx.ErrNoRows {
 		return Endpoint{}, fmt.Errorf("endpoint %s not found %w", endpointID, err)
