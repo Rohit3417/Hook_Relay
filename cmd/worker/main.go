@@ -4,6 +4,7 @@ import (
 	"Hook_Relay2/internal/adapters/circuitBreaker"
 	"Hook_Relay2/internal/adapters/redisqueue"
 	"Hook_Relay2/internal/adapters/signer"
+	"Hook_Relay2/internal/adapters/ssrf"
 	"Hook_Relay2/internal/adapters/storage"
 	"Hook_Relay2/internal/core/domain"
 	"Hook_Relay2/internal/core/ports"
@@ -24,7 +25,7 @@ import (
 const (
 	consumerGroup    = "dispatcher_group"
 	batchSize        = 10
-	failureThreshold = 3
+	failureThreshold = 50
 	cooldown         = 100 * time.Second
 )
 
@@ -43,10 +44,9 @@ func deadLetterAndack(ctx context.Context, queue redisqueue.Client, group string
 }
 
 // Helper function
-func recordFailureAndMaybeDeadLetter(ctx context.Context, queue redisqueue.Client, group string, event ports.QueuedEvents, breaker *circuitBreaker.Breaker) {
+func recordFailureAndMaybeDeadLetter(ctx context.Context, queue redisqueue.Client, group string, event ports.QueuedEvents, breaker *circuitBreaker.Breaker, currentAttempt int) {
 	breaker.RecordResult(event.Event.EndpointID, false)
-	event.Event.Attempts++
-	if event.Event.Attempts >= domain.MaxDeliveryAttempts {
+	if currentAttempt >= domain.MaxDeliveryAttempts {
 		event.Event.Status = domain.StatusDead
 		deadLetterAndack(ctx, queue, group, event)
 	}
@@ -59,13 +59,7 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 	// nothing in your system can genuinely fail during delivery — there's no destination to reject the request,
 	// no network error, no timeout.
 
-	// Checking the state of server
-	if !breaker.Allow(event.Event.EndpointID) {
-		log.Println("currently in opened state")
-		return
-	}
-
-	// Endpoint contains the url and secret to create Http request
+	// Endpoint contains the url and secret to create Http request and IsActive state to check
 	Endpoint, err := storage.GetEndpoint(ctx, pool, event.Event.EndpointID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		event.Event.Status = domain.StatusDead
@@ -77,6 +71,24 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 		return
 	}
 
+	if !Endpoint.IsActive {
+		log.Println("endpoint is not active")
+		return
+	}
+
+	attemptCount, err := storage.CountAttempts(ctx, pool, event.Event.ID)
+	attemptCount++
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	// Checking the state of server
+	if !breaker.Allow(event.Event.EndpointID) {
+		log.Println("currently in opened state")
+		return
+	}
+
 	//Signing function use
 	signedValue := signer.Sign(event.Event.Payload, Endpoint.Secret)
 	bodyReader := bytes.NewReader(event.Event.Payload)
@@ -85,29 +97,66 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 		log.Printf("Failed to create HTTP request for event %s: %v", event.Event.ID, reqErr)
 		return
 	}
+
 	// Setting custom header for security
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("WebHook-Signature", signedValue)
 
+	start := time.Now()
 	// use secureClient to execute
-	response, err := secureClient.Do(req)
-	if err != nil {
+	response, reqErr := secureClient.Do(req)
+	latency := time.Since(start)
+	// Building the Delivery attempt struct
+	var deliveryInfo domain.DeliveryAttempt
+	deliveryInfo.EventID = event.Event.ID
+	deliveryInfo.EndpointID = event.Event.EndpointID
+	deliveryInfo.TenantID = Endpoint.TenantID
+	deliveryInfo.AttemptNo = attemptCount
+	deliveryInfo.Duration = latency
+	if reqErr != nil {
+		deliveryInfo.ErrMsg = err.Error()
+		deliveryInfo.Success = false
+		deliveryInfo.HTTPStatus = 0
+		_ = storage.RecordAttempt(ctx, pool, deliveryInfo)
 		log.Printf("delivery request failed for event %s: %v", event.Event.ID, err)
-		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker)
+		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount)
 		return
 	}
 	defer response.Body.Close() // To avoid leakage of TCP connection
 	status := response.StatusCode
+
+	deliveryInfo.HTTPStatus = status
+	switch status / 100 {
+	case 2:
+		deliveryInfo.Success = true
+		deliveryInfo.ErrMsg = ""
+	case 4:
+		deliveryInfo.Success = false
+		deliveryInfo.ErrMsg = "a short message, e.g. “HTTP 400 Bad Request”"
+	case 5:
+		deliveryInfo.Success = false
+		deliveryInfo.ErrMsg = "a short message, e.g. “HTTP 503 Service Unavailable”"
+	default:
+		deliveryInfo.Success = false
+		deliveryInfo.ErrMsg = "a short message, e.g. “unexpected HTTP 302”"
+	}
+
+	// Once recording
+	err = storage.RecordAttempt(ctx, pool, deliveryInfo)
+	if err != nil {
+		log.Printf("failed to record attempt for event %s: %v", event.Event.ID, err)
+	}
 	switch status / 100 {
 	case 4:
 		//the endpoint responded, so it's reachable — the payload itself is what's rejected,
 		// not the destination being down) and immediately dead-lettering (retrying won't fix a malformed request)
 		event.Event.Status = domain.StatusDead
+		event.Event.Attempts = attemptCount
 		breaker.RecordResult(event.Event.EndpointID, true)
 		deadLetterAndack(ctx, queue, group, event)
 		return
 	case 5:
-		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker)
+		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount)
 		return
 
 	case 2:
@@ -122,7 +171,7 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 
 	default: // Case of 1xx or 3xx (1xx is They notify the client that the initial part of an HTTP request has been received and that processing is continuing, 3xx )
 		log.Printf("unexpected status %d for event %s", status, event.Event.ID)
-		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker)
+		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount)
 		return
 	}
 
@@ -150,8 +199,8 @@ func main() {
 	}
 	defer client.Close()
 
-	//secureClient := ssrf.NewSecureClient()
-	secureClient := &http.Client{Timeout: 10 * time.Second} // for testing local case as ssrf will block my requests only
+	secureClient := ssrf.NewSecureClient()
+	// secureClient := &http.Client{Timeout: 10 * time.Second} // for testing local case as ssrf will block my requests only
 	breaker := circuitBreaker.New(failureThreshold, cooldown)
 
 	log.Println("worker started")
