@@ -43,6 +43,8 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
+	//resolver := &graph.Resolver{Pool: pool}
+
 	h := handler.NewHandler(pool, client, queue)
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
