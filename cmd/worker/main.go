@@ -1,6 +1,7 @@
 package main
 
 import (
+	"Hook_Relay2/internal/adapters/attemptsfeed"
 	"Hook_Relay2/internal/adapters/circuitBreaker"
 	"Hook_Relay2/internal/adapters/redisqueue"
 	"Hook_Relay2/internal/adapters/signer"
@@ -15,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -46,13 +48,28 @@ func deadLetterAndack(ctx context.Context, queue redisqueue.Client, group string
 // Helper function
 func recordFailureAndMaybeDeadLetter(ctx context.Context, queue redisqueue.Client, group string, event ports.QueuedEvents, breaker *circuitBreaker.Breaker, currentAttempt int) {
 	breaker.RecordResult(event.Event.EndpointID, false)
+	event.Event.Attempts = currentAttempt
 	if currentAttempt >= domain.MaxDeliveryAttempts {
 		event.Event.Status = domain.StatusDead
 		deadLetterAndack(ctx, queue, group, event)
 	}
 }
 
-func handle(ctx context.Context, queue redisqueue.Client, group string, event ports.QueuedEvents, secureClient *http.Client, breaker *circuitBreaker.Breaker, pool *pgxpool.Pool) {
+func recordAndPublish(ctx context.Context, pool *pgxpool.Pool, publisher *attemptsfeed.Publisher, deliveryInfo domain.DeliveryAttempt, event ports.QueuedEvents) {
+	deliverID, attemptedAt, err := storage.RecordAttempt(ctx, pool, deliveryInfo)
+	if err != nil {
+		log.Printf("failed to record attempt for event %s: %v", event.Event.ID, err)
+		return
+	}
+
+	msg := attemptsfeed.NewMessage(deliveryInfo, deliverID, attemptedAt)
+	pubErr := publisher.Publish(ctx, msg)
+	if pubErr != nil {
+		log.Printf("failed to publish live attempt to redis: %v", pubErr)
+	}
+}
+
+func handle(ctx context.Context, queue redisqueue.Client, group string, event ports.QueuedEvents, secureClient *http.Client, breaker *circuitBreaker.Breaker, pool *pgxpool.Pool, publisher *attemptsfeed.Publisher) {
 
 	// The failure condition or the condition for which we increase attempts count :
 	// Without an actual outbound HTTP call to a destination server,
@@ -72,22 +89,16 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 	}
 
 	if !Endpoint.IsActive {
-		log.Println("endpoint is not active")
+		log.Printf("endpoint: %v is not active\n", event.Event.EndpointID)
 		return
 	}
 
 	attemptCount, err := storage.CountAttempts(ctx, pool, event.Event.ID)
-	attemptCount++
 	if err != nil {
 		log.Println(err)
 		return
 	}
-
-	// Checking the state of server
-	if !breaker.Allow(event.Event.EndpointID) {
-		log.Println("currently in opened state")
-		return
-	}
+	attemptCount++
 
 	//Signing function use
 	signedValue := signer.Sign(event.Event.Payload, Endpoint.Secret)
@@ -102,6 +113,11 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("WebHook-Signature", signedValue)
 
+	// Checking the state of server
+	if !breaker.Allow(event.Event.EndpointID) {
+		log.Println("currently in opened state")
+		return
+	}
 	start := time.Now()
 	// use secureClient to execute
 	response, reqErr := secureClient.Do(req)
@@ -117,7 +133,7 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 		deliveryInfo.ErrMsg = reqErr.Error()
 		deliveryInfo.Success = false
 		deliveryInfo.HTTPStatus = 0
-		_ = storage.RecordAttempt(ctx, pool, deliveryInfo)
+		recordAndPublish(ctx, pool, publisher, deliveryInfo, event)
 		log.Printf("delivery request failed for event %s: %v", event.Event.ID, reqErr)
 		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount)
 		return
@@ -132,20 +148,17 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 		deliveryInfo.ErrMsg = ""
 	case 4:
 		deliveryInfo.Success = false
-		deliveryInfo.ErrMsg = "a short message, e.g. “HTTP 400 Bad Request”"
+		deliveryInfo.ErrMsg = "HTTP: " + strconv.Itoa(status) + " " + http.StatusText(status)
 	case 5:
 		deliveryInfo.Success = false
-		deliveryInfo.ErrMsg = "a short message, e.g. “HTTP 503 Service Unavailable”"
+		deliveryInfo.ErrMsg = "HTTP: " + strconv.Itoa(status) + " " + http.StatusText(status)
 	default:
 		deliveryInfo.Success = false
-		deliveryInfo.ErrMsg = "a short message, e.g. “unexpected HTTP 302”"
+		deliveryInfo.ErrMsg = "HTTP: " + strconv.Itoa(status) + " " + http.StatusText(status)
 	}
 
-	// Once recording
-	err = storage.RecordAttempt(ctx, pool, deliveryInfo)
-	if err != nil {
-		log.Printf("failed to record attempt for event %s: %v", event.Event.ID, err)
-	}
+	recordAndPublish(ctx, pool, publisher, deliveryInfo, event)
+
 	switch status / 100 {
 	case 4:
 		//the endpoint responded, so it's reachable — the payload itself is what's rejected,
@@ -198,6 +211,7 @@ func main() {
 		return
 	}
 	defer client.Close()
+	publisher := attemptsfeed.New(client)
 
 	secureClient := ssrf.NewSecureClient()
 	// secureClient := &http.Client{Timeout: 10 * time.Second} // for testing local case as ssrf will block my requests only
@@ -229,7 +243,7 @@ func main() {
 			}
 
 			for _, event := range events {
-				handle(loopCtx, queue, consumerGroup, event, secureClient, breaker, pool)
+				handle(loopCtx, queue, consumerGroup, event, secureClient, breaker, pool, publisher)
 			}
 
 			// Check every 5 second for stale events
@@ -250,7 +264,7 @@ func main() {
 		}
 
 		for _, event := range events {
-			handle(loopCtx, queue, consumerGroup, event, secureClient, breaker, pool)
+			handle(loopCtx, queue, consumerGroup, event, secureClient, breaker, pool, publisher)
 		}
 
 	}
