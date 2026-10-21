@@ -7,6 +7,7 @@ package graph
 
 import (
 	"Hook_Relay2/internal/adapters/attemptsfeed"
+	"Hook_Relay2/internal/adapters/graphql/dataloaders"
 	"Hook_Relay2/internal/adapters/graphql/graph/model"
 	"context"
 	"crypto/rand"
@@ -17,7 +18,7 @@ import (
 	"log"
 	"time"
 
-	pgx "github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5"
 )
 
 const contextKey = "tenant_id"
@@ -29,6 +30,29 @@ func helper(ctx context.Context) (string, error) {
 	}
 
 	return id, nil
+}
+
+// Stats is the resolver for the stats field.
+func (r *endpointResolver) Stats(ctx context.Context, obj *model.Endpoint) (*model.EndpointStats, error) {
+	// panic(fmt.Errorf("not implemented: Stats - stats"))
+
+	// 1. Extract the loaders injected by the middleware
+	loaders, ok := ctx.Value(dataloaders.LoadersKey).(*dataloaders.Loaders)
+	if !ok {
+		return nil, fmt.Errorf("dataloaders not found in context")
+	}
+
+	// 2. Queue this endpoint's ID into the StatsLoader
+	// Load() doesn't execute immediately; it returns a "thunk" (a deferred function)
+	thunk := loaders.StatsLoader.Load(ctx, obj.ID)
+
+	// 3. Execute the thunk. This blocks until the batch query completes.
+	result, err := thunk()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load stats for endpoint %s: %w", obj.ID, err)
+	}
+
+	return result, nil
 }
 
 // CreateEndpoint is the resolver for the createEndpoint field.
@@ -165,7 +189,7 @@ func (r *queryResolver) Endpoints(ctx context.Context) ([]*model.Endpoint, error
 	}
 
 	var endpoints []*model.Endpoint
-	rows, err := r.Pool.Query(ctx, "SELECT id, url, is_active, created_at from endpoints where tenant_id = $1", tenantID)
+	rows, err := r.Pool.Query(ctx, "SELECT id, url, is_active, created_at from endpoints where tenant_id = $1 order by created_at desc", tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch endpoints for tenant %s: %w", tenantID, err)
 	}
@@ -225,12 +249,35 @@ func (r *queryResolver) Endpoint(ctx context.Context, id string) (*model.Endpoin
 
 // Metrics is the resolver for the metrics field.
 func (r *queryResolver) Metrics(ctx context.Context, rangeArg model.TimeRange) (*model.Metrics, error) {
-	panic(fmt.Errorf("not implemented: Metrics - metrics"))
+	// panic(fmt.Errorf("not implemented: Metrics - metrics"))
+	tenant_id, err := helper(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unauthorized")
+	}
+
+	query := `
+				SELECT 
+					COUNT(*) as eventIngest,
+					COUNT(*) FILTER (WHERE success = true) as DeliveriesSucceeded,
+					COUNT(*) FILTER (WHERE success = false) as DeliveriesFailed
+				FROM delivery_attempts
+				WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= &3		
+			`
+
+	var metrics model.Metrics
+	err = r.Pool.QueryRow(ctx, query, tenant_id, rangeArg.From, rangeArg.To).Scan(&metrics.EventsIngested, &metrics.DeliveriesSucceeded, &metrics.DeliveriesFailed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch metrics for tenant %s: %w", tenant_id, err)
+	}
+
+	return &metrics, nil
 }
 
 // Billing is the resolver for the billing field.
 func (r *queryResolver) Billing(ctx context.Context) (*model.Billing, error) {
-	panic(fmt.Errorf("not implemented: Billing - billing"))
+	// panic(fmt.Errorf("not implemented: Billing - billing"))
+
+	return nil, nil
 }
 
 // DeliveryAttempts is the resolver for the deliveryAttempts field.
@@ -239,7 +286,7 @@ func (r *subscriptionResolver) DeliveryAttempts(ctx context.Context, endpointID 
 
 	var channelName string
 	tenant_id, err := helper(ctx)
-	print(tenant_id)
+	// print(tenant_id)
 	if err != nil {
 		return nil, fmt.Errorf("unauthorized")
 	}
@@ -328,6 +375,9 @@ func (r *subscriptionResolver) DeliveryAttempts(ctx context.Context, endpointID 
 	return ch, nil
 }
 
+// Endpoint returns EndpointResolver implementation.
+func (r *Resolver) Endpoint() EndpointResolver { return &endpointResolver{r} }
+
 // Mutation returns MutationResolver implementation.
 func (r *Resolver) Mutation() MutationResolver { return &mutationResolver{r} }
 
@@ -338,6 +388,7 @@ func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
 func (r *Resolver) Subscription() SubscriptionResolver { return &subscriptionResolver{r} }
 
 type (
+	endpointResolver     struct{ *Resolver }
 	mutationResolver     struct{ *Resolver }
 	queryResolver        struct{ *Resolver }
 	subscriptionResolver struct{ *Resolver }
@@ -348,3 +399,15 @@ type (
 // one last chance to move it out of harms way if you want. There are two reasons this happens:
 //  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
 //    it when you're done.
+//  - You have helper methods in this file. Move them out to keep these resolver files clean.
+/*
+	const contextKey = "tenant_id"
+func helper(ctx context.Context) (string, error) {
+	id, ok := ctx.Value(contextKey).(string)
+	if !ok {
+		return "", fmt.Errorf("authentication required")
+	}
+
+	return id, nil
+}
+*/

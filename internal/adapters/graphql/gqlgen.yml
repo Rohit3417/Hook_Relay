@@ -201,4 +201,8 @@ models:
     fields:
       tenant:
         resolver: true
+      stats:
+        resolver: true
+  
+
 
