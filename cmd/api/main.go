@@ -1,6 +1,8 @@
 package main
 
 import (
+	"Hook_Relay2/internal/adapters/graphql"
+	"Hook_Relay2/internal/adapters/graphql/graph"
 	"Hook_Relay2/internal/adapters/handler"
 	"Hook_Relay2/internal/adapters/redisqueue"
 	"Hook_Relay2/internal/adapters/storage"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
@@ -43,15 +46,22 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
-	//resolver := &graph.Resolver{Pool: pool}
+	resolver := &graph.Resolver{Pool: pool, Client: client}
+	gqlHandler := graphql.NewHandler(pool, resolver)
 
 	h := handler.NewHandler(pool, client, queue)
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
+
+	//REST routes
 	r.Route("/", func(r chi.Router) {
 		r.Get("/healthz", h.Healthz)
 		r.Post("/api/v1/publish", h.Publish)
 	})
+
+	//Graphql	Routes
+	r.Handle("/query", gqlHandler)
+	r.Handle("/", playground.Handler("GraphQL playground", "/query"))
 
 	port := os.Getenv("PORT")
 	fmt.Printf("Listening on port : %v\n", port)
