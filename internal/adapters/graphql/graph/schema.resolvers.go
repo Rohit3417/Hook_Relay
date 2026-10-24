@@ -290,7 +290,7 @@ func (r *subscriptionResolver) DeliveryAttempts(ctx context.Context, endpointID 
 	if err != nil {
 		return nil, fmt.Errorf("unauthorized")
 	}
-	if *endpointID == "" {
+	if endpointID != nil && *endpointID == "" {
 		channelName = attemptsfeed.TenantChannel(tenant_id)
 	} else {
 		channelName = attemptsfeed.EndpointChannel(*endpointID)
