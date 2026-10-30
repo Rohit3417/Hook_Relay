@@ -28,7 +28,7 @@ func GenerateEnrollment(email string) (secret, uri string, err error) {
 	secret = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secretBytes)
 
 	//URL encode with issuer:AccountName
-	// URL pathEscape replace special char to their respective format like @ to %40 or %20 for space
+	// URL pathEscape replace special char to their respective format like /, ;, , and  %20 for space
 	label := url.PathEscape(fmt.Sprintf("HookRelay:%s", email))
 
 	uri = fmt.Sprintf("otpauth://totp/%s?secret=%s&issuer=HookRelay&algorithm=SHA1&digits=6&period=30", label, secret)
