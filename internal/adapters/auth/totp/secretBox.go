@@ -9,11 +9,13 @@ import (
 	"io"
 )
 
+// NOTE : the aad will conttain the userid in bytes so that we encrypt the secret along with userid so no 2 users will have the same secret
+
 // Encrypting the secret to secure TOTP secrte for database storeage
 // So if database is leaked the stolen columns are useless
 
 // The key is not in database
-func EncryptSecret(plainTextSecret string, masterKey []byte) (string, error) {
+func EncryptSecret(plainTextSecret string, masterKey []byte, aad []byte) (string, error) {
 	if len(masterKey) != 32 {
 		return "", fmt.Errorf("invalid encryption key: must be exactly 32 bytes")
 	}
@@ -35,13 +37,13 @@ func EncryptSecret(plainTextSecret string, masterKey []byte) (string, error) {
 	}
 
 	// append the ciphertext directly to nonce
-	cipherText := aesGCM.Seal(nonce, nonce, []byte(plainTextSecret), nil)
+	cipherText := aesGCM.Seal(nonce, nonce, []byte(plainTextSecret), aad)
 
 	return base64.StdEncoding.EncodeToString(cipherText), nil
 }
 
 // Retriving the plain Secret from database
-func DecryptSecret(encryptedBase64 string, masterKey []byte) (string, error) {
+func DecryptSecret(encryptedBase64 string, masterKey []byte, aad []byte) (string, error) {
 	if len(masterKey) != 32 {
 		return "", fmt.Errorf("invalid master key: must be exactly 32 bytes")
 	}
@@ -70,7 +72,7 @@ func DecryptSecret(encryptedBase64 string, masterKey []byte) (string, error) {
 	nonce, encryptedMessage := cipherText[:nonceSize], cipherText[nonceSize:]
 
 	// Open decrypt and authenticate message
-	plainTextBytes, err := aesGCM.Open(nil, nonce, encryptedMessage, nil)
+	plainTextBytes, err := aesGCM.Open(nil, nonce, encryptedMessage, aad)
 	if err != nil {
 		return "", err
 	}
