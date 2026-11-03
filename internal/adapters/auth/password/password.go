@@ -25,7 +25,7 @@ const (
 func Hash(password string) (string, error) {
 
 	if len(password) > maxPass {
-		return "", fmt.Errorf("passwrod too long")
+		return "", fmt.Errorf("password too long")
 	}
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
@@ -96,8 +96,7 @@ func Verify(password string, encoded string) (bool, error) {
 
 	if subtle.ConstantTimeCompare(key, newKey) == 1 {
 		return true, nil
-	} else {
-		return false, nil
 	}
 
+	return false, nil
 }
