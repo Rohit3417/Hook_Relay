@@ -9,9 +9,9 @@ import (
 	"io"
 )
 
-// NOTE : the aad will conttain the userid in bytes so that we encrypt the secret along with userid so no 2 users will have the same secret
+// NOTE : the aad will contain the userid in bytes so that we encrypt the secret along with userid so no 2 users will have the same secret
 
-// Encrypting the secret to secure TOTP secrte for database storeage
+// Encrypting the secret to secure TOTP secret for database storage
 // So if database is leaked the stolen columns are useless
 
 // The key is not in database
