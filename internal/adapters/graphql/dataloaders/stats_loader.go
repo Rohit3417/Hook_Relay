@@ -47,7 +47,7 @@ func GetStatsBatch(pool *pgxpool.Pool) dataloader.BatchFunc[string, *model.Endpo
 				COUNT(*) as total_deliveries,
 				COALESCE(AVG(CASE WHEN success THEN 1.0 ELSE 0.0 END), 0.0) as success_rate,
 				COALESCE(AVG(duration_ms), 0.0) as avg_latency_ms,
-				MAX(created_at) as last_delivery_at
+				MAX(attempted_at) as last_delivery_at
 			FROM delivery_attempts
 			WHERE endpoint_id = ANY($1)
 			GROUP BY endpoint_id

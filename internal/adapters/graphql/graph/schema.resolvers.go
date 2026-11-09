@@ -261,7 +261,7 @@ func (r *queryResolver) Metrics(ctx context.Context, rangeArg model.TimeRange) (
 					COUNT(*) FILTER (WHERE success = true) as DeliveriesSucceeded,
 					COUNT(*) FILTER (WHERE success = false) as DeliveriesFailed
 				FROM delivery_attempts
-				WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= &3		
+				WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3		
 			`
 
 	var metrics model.Metrics
@@ -290,7 +290,7 @@ func (r *subscriptionResolver) DeliveryAttempts(ctx context.Context, endpointID 
 	if err != nil {
 		return nil, fmt.Errorf("unauthorized")
 	}
-	if endpointID != nil && *endpointID == "" {
+	if endpointID == nil && *endpointID == "" {
 		channelName = attemptsfeed.TenantChannel(tenant_id)
 	} else {
 		channelName = attemptsfeed.EndpointChannel(*endpointID)
