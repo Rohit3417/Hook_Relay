@@ -2,6 +2,7 @@ package main
 
 import (
 	"Hook_Relay2/internal/adapters/attemptsfeed"
+	"Hook_Relay2/internal/adapters/backoff"
 	"Hook_Relay2/internal/adapters/circuitBreaker"
 	"Hook_Relay2/internal/adapters/redisqueue"
 	"Hook_Relay2/internal/adapters/signer"
@@ -32,12 +33,20 @@ const (
 )
 
 // Helper function
-func deadLetterAndack(ctx context.Context, queue redisqueue.Client, group string, event ports.QueuedEvents) {
+func deadLetterAndack(ctx context.Context, pool *pgxpool.Pool, queue redisqueue.Client, group string, event ports.QueuedEvents) {
+	// 1. Update event status in PostgreSQL
+	if err := storage.UpdateEventStatus(ctx, pool, event.Event.ID, domain.StatusDead, event.Event.Attempts); err != nil {
+		log.Printf("Failed to update event %s status to dead in DB: %v", event.Event.ID, err)
+	}
+
+	// 2. Push to Redis Dead Letter Queue stream
 	err2 := queue.DeadLetter(ctx, event.Event)
 	if err2 != nil {
 		log.Printf("Failed to dead-letter event %s: %v", event.Event.ID, err2)
 		return // Return without ACKing so ReclaimStale can try the DLQ route again
 	}
+
+	// acknowledge message from ingress
 	ackErr := queue.Ack(ctx, group, event.MessageID)
 	if ackErr != nil {
 		log.Printf("Failed to ack after dead-lettering %s: %v", event.MessageID, ackErr)
@@ -45,14 +54,36 @@ func deadLetterAndack(ctx context.Context, queue redisqueue.Client, group string
 
 }
 
-// Helper function
-func recordFailureAndMaybeDeadLetter(ctx context.Context, queue redisqueue.Client, group string, event ports.QueuedEvents, breaker *circuitBreaker.Breaker, currentAttempt int) {
-	breaker.RecordResult(event.Event.EndpointID, false)
+// Helper function to record failure, handle circuit breaker tripping, apply backoff, or route to DLQ
+func recordFailureAndMaybeDeadLetter(ctx context.Context, queue redisqueue.Client, group string, event ports.QueuedEvents, breaker *circuitBreaker.Breaker, currentAttempt int, pool *pgxpool.Pool) {
+	tripped := breaker.RecordResult(event.Event.EndpointID, false)
+	if tripped {
+		// Circuit breaker tripped to OPEN: automatically mark endpoint paused in Postgres as per Roadmap Phase 2
+		_, err := pool.Exec(ctx, "UPDATE endpoints SET is_active = false WHERE id = $1", event.Event.EndpointID)
+		if err != nil {
+			log.Printf("Failed to pause endpoint %s in database: %v", event.Event.EndpointID, err)
+		} else {
+			log.Printf("Circuit breaker TRIPPED for endpoint %s: paused in database", event.Event.EndpointID)
+		}
+	}
+
 	event.Event.Attempts = currentAttempt
+
 	if currentAttempt >= domain.MaxDeliveryAttempts {
 		event.Event.Status = domain.StatusDead
-		deadLetterAndack(ctx, queue, group, event)
+		deadLetterAndack(ctx, pool, queue, group, event)
+		return
 	}
+
+	// Persist attempt count to database
+	if err := storage.UpdateEventStatus(ctx, pool, event.Event.ID, domain.StatusPending, currentAttempt); err != nil {
+		log.Printf("Failed to update event %s attempts in DB: %v", event.Event.ID, err)
+	}
+
+	// Apply exponential backoff with full jitter
+	delay := backoff.Wait(currentAttempt, 500*time.Millisecond, 10*time.Second)
+	log.Printf("Event %s failed attempt %d/%d; applying backoff %v", event.Event.ID, currentAttempt, domain.MaxDeliveryAttempts, delay)
+	time.Sleep(delay)
 }
 
 func recordAndPublish(ctx context.Context, pool *pgxpool.Pool, publisher *attemptsfeed.Publisher, deliveryInfo domain.DeliveryAttempt, event ports.QueuedEvents) {
@@ -81,7 +112,7 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 	if errors.Is(err, pgx.ErrNoRows) {
 		event.Event.Status = domain.StatusDead
 		log.Printf("Endpoint %s permanently missing, sending to DLQ", event.Event.EndpointID)
-		deadLetterAndack(ctx, queue, group, event)
+		deadLetterAndack(ctx, pool, queue, group, event)
 		return
 	} else if err != nil {
 		log.Printf("Database error fetching endpoint %s, waiting for retry: %v", event.Event.EndpointID, err)
@@ -135,7 +166,7 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 		deliveryInfo.HTTPStatus = 0
 		recordAndPublish(ctx, pool, publisher, deliveryInfo, event)
 		log.Printf("delivery request failed for event %s: %v", event.Event.ID, reqErr)
-		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount)
+		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount, pool)
 		return
 	}
 	defer response.Body.Close() // To avoid leakage of TCP connection
@@ -166,10 +197,10 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 		event.Event.Status = domain.StatusDead
 		event.Event.Attempts = attemptCount
 		breaker.RecordResult(event.Event.EndpointID, true)
-		deadLetterAndack(ctx, queue, group, event)
+		deadLetterAndack(ctx, pool, queue, group, event)
 		return
 	case 5:
-		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount)
+		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount, pool)
 		return
 
 	case 2:
@@ -184,7 +215,7 @@ func handle(ctx context.Context, queue redisqueue.Client, group string, event po
 
 	default: // Case of 1xx or 3xx (1xx is They notify the client that the initial part of an HTTP request has been received and that processing is continuing, 3xx )
 		log.Printf("unexpected status %d for event %s", status, event.Event.ID)
-		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount)
+		recordFailureAndMaybeDeadLetter(ctx, queue, group, event, breaker, attemptCount, pool)
 		return
 	}
 
