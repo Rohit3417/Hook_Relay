@@ -1,12 +1,17 @@
 package handler
 
 import (
+	"Hook_Relay2/internal/adapters/storage"
 	"Hook_Relay2/internal/core/domain"
 	"Hook_Relay2/internal/core/ports"
 	"context"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,15 +20,15 @@ import (
 )
 
 type Handler struct {
-	pool   *pgxpool.Pool
-	client *redis.Client
-	queue  ports.EventQueue
+	pool       *pgxpool.Pool
+	client     *redis.Client
+	queue      ports.EventQueue
+	privateKey *rsa.PrivateKey
 }
 
 type publishRequest struct {
-	TenantID   string
-	EndpointID string
-	Payload    []byte
+	EndpointID string          `json:"endpoint_id"`
+	Payload    json.RawMessage `json:"payload"`
 }
 
 type publishResponse struct {
@@ -31,8 +36,8 @@ type publishResponse struct {
 	Status  string `json:"status"`
 }
 
-func NewHandler(pool *pgxpool.Pool, client *redis.Client, queue ports.EventQueue) *Handler {
-	return &Handler{pool: pool, client: client, queue: queue}
+func NewHandler(pool *pgxpool.Pool, client *redis.Client, queue ports.EventQueue, privateKey *rsa.PrivateKey) *Handler {
+	return &Handler{pool: pool, client: client, queue: queue, privateKey: privateKey}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -71,29 +76,73 @@ func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed: use POST")
+	// 1. Extract API key from Authorization header
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		writeError(w, http.StatusUnauthorized, "missing Authorization header")
 		return
 	}
+	parts := strings.Split(authHeader, " ")
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+		writeError(w, http.StatusUnauthorized, "invalid header format, expected: Bearer <api_key>")
+		return
+	}
+	plainKey := parts[1]
 
-	var req publishRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
+	// 2. Hash the key with SHA-256
+	keyHash := hex.EncodeToString(sha256.New().Sum([]byte(plainKey)))
+	redisKey := "apikey:" + keyHash
+
+	// 3. Lookup tenant_id in Redis (fast path)
+	ctx := r.Context()
+	tenantID, err := h.client.Get(ctx, redisKey).Result()
 	if err != nil {
+		// Cache miss: check Postgres
+		err = h.pool.QueryRow(ctx, "SELECT id FROM tenants WHERE api_key_hash = $1", keyHash).Scan(&tenantID)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "invalid API key")
+			return
+		}
+		// Cache for future requests
+		_ = h.client.Set(ctx, redisKey, tenantID, 1*time.Hour).Err()
+	}
+
+	// 4. Parse JSON body
+	var req publishRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 
-	if req.TenantID == "" || req.EndpointID == "" {
-		writeError(w, http.StatusBadRequest, "tenant_id and endpoint_id are required")
+	if req.EndpointID == "" || len(req.Payload) == 0 {
+		writeError(w, http.StatusBadRequest, "endpoint_id and payload are required")
 		return
 	}
 
-	id := uuid.New().String()
-	event := domain.NewEvent(id, req.TenantID, req.EndpointID, req.Payload)
+	// 5. Verify the endpoint belongs to this tenant
+	var endpointExists bool
+	err = h.pool.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM endpoints WHERE id = $1 AND tenant_id = $2)",
+		req.EndpointID, tenantID,
+	).Scan(&endpointExists)
+	if err != nil || !endpointExists {
+		writeError(w, http.StatusNotFound, "endpoint not found for this tenant")
+		return
+	}
 
-	err = h.queue.Publish(r.Context(), event)
-	if err != nil {
-		log.Printf("publish failed for tenant=%s endpoint=%s: %v", req.TenantID, req.EndpointID, err)
+	// 6. Persist event in Postgres
+	id := uuid.New().String()
+	event := domain.NewEvent(id, tenantID, req.EndpointID, []byte(req.Payload))
+
+	if err := storage.SaveEvent(ctx, h.pool, event); err != nil {
+		log.Printf("failed to persist event %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to persist event")
+		return
+	}
+
+	// 7. Push to Redis Stream
+	if err := h.queue.Publish(ctx, event); err != nil {
+		log.Printf("publish failed for tenant=%s: %v", tenantID, err)
 		writeError(w, http.StatusInternalServerError, "failed to queue event")
 		return
 	}
