@@ -15,7 +15,21 @@ const (
 	TenantIDKey contextKey = "tenantID"
 )
 
+// GetTenantID retrieves the authenticated tenant ID from context
+func GetTenantID(ctx context.Context) (string, bool) {
+	val, ok := ctx.Value(TenantIDKey).(string)
+	return val, ok && val != ""
+}
+
+// GetUserID retrieves the authenticated user ID from context
+func GetUserID(ctx context.Context) (string, bool) {
+	val, ok := ctx.Value(UserIDKey).(string)
+	return val, ok && val != ""
+}
+
 // AuthMiddleware intercepts requests to validate the RS256 JWT
+// If no Authorization header is provided, it passes the request through unauthenticated.
+// Resolvers that require authentication will reject unauthenticated contexts.
 func AuthMiddleware(publicKey *rsa.PublicKey) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
