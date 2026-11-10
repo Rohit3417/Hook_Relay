@@ -7,6 +7,7 @@ package graph
 
 import (
 	"Hook_Relay2/internal/adapters/attemptsfeed"
+	jwtauth "Hook_Relay2/internal/adapters/auth/jwtAuth"
 	"Hook_Relay2/internal/adapters/graphql/dataloaders"
 	"Hook_Relay2/internal/adapters/graphql/graph/model"
 	"context"
@@ -24,7 +25,7 @@ import (
 const contextKey = "tenant_id"
 
 func helper(ctx context.Context) (string, error) {
-	id, ok := ctx.Value(contextKey).(string)
+	id, ok := jwtauth.GetTenantID(ctx)
 	if !ok {
 		return "", fmt.Errorf("authentication required")
 	}
@@ -261,7 +262,7 @@ func (r *queryResolver) Metrics(ctx context.Context, rangeArg model.TimeRange) (
 					COUNT(*) FILTER (WHERE success = true) as DeliveriesSucceeded,
 					COUNT(*) FILTER (WHERE success = false) as DeliveriesFailed
 				FROM delivery_attempts
-				WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3		
+				WHERE tenant_id = $1 AND attempted_at >= $2 AND attempted_at <= $3		
 			`
 
 	var metrics model.Metrics
