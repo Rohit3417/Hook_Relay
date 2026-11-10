@@ -56,42 +56,57 @@ func (b *Breaker) Allow(endpointID string) bool {
 	case Closed:
 		return true
 	case Open:
-		if b.now().Sub(b.endpoints[endpointID].openedAt) >= b.cooldown {
-
+		if b.now().Sub(rec.openedAt) >= b.cooldown {
 			rec.state = HalfOpen
 			rec.trialInFlight = true
 			return true
-		} else {
+		}
+		return false
+	case HalfOpen:
+		if rec.trialInFlight {
 			return false
 		}
+		rec.trialInFlight = true
+		return true
 	default:
 		return false
 	}
 }
 
-func (b *Breaker) RecordResult(endpointID string, success bool) {
+func (b *Breaker) RecordResult(endpointID string, success bool) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	rec := b.getOrCreate(endpointID)
-	currState := rec.state
 
-	if success && currState == Closed {
+	if success {
 		rec.consecutiveFailures = 0
-	} else if !success && currState == Closed {
-		rec.consecutiveFailures++
-		if rec.consecutiveFailures >= b.failureThreshold {
-			rec.state = Open
-			rec.openedAt = b.now()
-		}
-
-	} else if success && currState == HalfOpen {
 		rec.state = Closed
-		rec.consecutiveFailures = 0
 		rec.trialInFlight = false
-	} else if !success && currState == HalfOpen {
-		rec.state = Open
-		rec.openedAt = b.now()
+		return false
 	}
 
+	// Failure case
+	rec.consecutiveFailures++
+	if rec.state == Closed && rec.consecutiveFailures >= b.failureThreshold {
+		rec.state = Open
+		rec.openedAt = b.now()
+		rec.trialInFlight = false
+		return true // Just tripped to open
+	} else if rec.state == HalfOpen {
+		rec.state = Open
+		rec.openedAt = b.now()
+		rec.trialInFlight = false
+		return true
+	}
+
+	return false
+}
+
+func (b *Breaker) GetState(endpointID string) State {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	rec := b.getOrCreate(endpointID)
+	return rec.state
 }
