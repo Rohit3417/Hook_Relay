@@ -20,10 +20,11 @@ import (
 )
 
 type Handler struct {
-	pool       *pgxpool.Pool
-	client     *redis.Client
-	queue      ports.EventQueue
-	privateKey *rsa.PrivateKey
+	pool          *pgxpool.Pool
+	client        *redis.Client
+	queue         ports.EventQueue
+	privateKey    *rsa.PrivateKey
+	totpMasterKey []byte
 }
 
 type publishRequest struct {
@@ -36,8 +37,13 @@ type publishResponse struct {
 	Status  string `json:"status"`
 }
 
-func NewHandler(pool *pgxpool.Pool, client *redis.Client, queue ports.EventQueue, privateKey *rsa.PrivateKey) *Handler {
-	return &Handler{pool: pool, client: client, queue: queue, privateKey: privateKey}
+const (
+	QuotaFree = 1000   // 1,000 events/month
+	QuotaPro  = 100000 // 100,000 events/month
+)
+
+func NewHandler(pool *pgxpool.Pool, client *redis.Client, queue ports.EventQueue, privateKey *rsa.PrivateKey, totpKey []byte) *Handler {
+	return &Handler{pool: pool, client: client, queue: queue, privateKey: privateKey, totpMasterKey: totpKey}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -90,7 +96,10 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 	plainKey := parts[1]
 
 	// 2. Hash the key with SHA-256
-	keyHash := hex.EncodeToString(sha256.New().Sum([]byte(plainKey)))
+	// CORRECT (hashes plainKey with SHA-256)
+	plainKey = strings.TrimSpace(plainKey)
+	hash := sha256.Sum256([]byte(plainKey))
+	keyHash := hex.EncodeToString(hash[:])
 	redisKey := "apikey:" + keyHash
 
 	// 3. Lookup tenant_id in Redis (fast path)
@@ -103,8 +112,21 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "invalid API key")
 			return
 		}
-		// Cache for future requests
-		_ = h.client.Set(ctx, redisKey, tenantID, 1*time.Hour).Err()
+	}
+
+	// Cache for future requests
+	_ = h.client.Set(ctx, redisKey, tenantID, 1*time.Hour).Err()
+	// 1. Current month bucket key for billing/quota: "metering:<tenantID>:YYYYMM"
+	monthKey := "metering:" + tenantID + ":" + time.Now().UTC().Format("200601")
+
+	// 2. Fetch current monthly usage from Redis
+	currentUsage, _ := h.client.Get(ctx, monthKey).Int64()
+
+	// 3. (Optional) Check tier limit (assuming FREE for default)
+	// You can query tenant tier from Postgres or cache it in Redis
+	if currentUsage >= 1000 { // Limit for Free Tier
+		writeError(w, http.StatusTooManyRequests, "monthly event quota exceeded; upgrade to Pro")
+		return
 	}
 
 	// 4. Parse JSON body
@@ -147,8 +169,22 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 8. Event is safely accepted -> Increment counters now:
+	// A) Monthly counter for quota/billing
+	_ = h.client.Incr(ctx, monthKey).Err()
+	// Set TTL to 35 days so old months auto-clean from Redis
+	_ = h.client.Expire(ctx, monthKey, 35*24*time.Hour).Err()
+
+	// 1. Current hour bucket key: "metering:events:YYYYMMDDHH"
+	hourBucket := time.Now().UTC().Format("2006010215")
+	redisUsageKey := "metering:" + hourBucket
+
+	// 2. Increment this tenant's counter by 1
+	_ = h.client.HIncrBy(ctx, redisUsageKey, tenantID, 1).Err()
+
 	writeJSON(w, http.StatusAccepted, publishResponse{
 		EventID: id,
 		Status:  "accepted",
 	})
+
 }

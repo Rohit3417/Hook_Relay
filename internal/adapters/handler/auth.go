@@ -10,6 +10,8 @@ import (
 
 	jwtauth "Hook_Relay2/internal/adapters/auth/jwtAuth"
 	"Hook_Relay2/internal/adapters/auth/password"
+	"Hook_Relay2/internal/adapters/auth/recovery"
+	"Hook_Relay2/internal/adapters/auth/totp"
 )
 
 type signupRequest struct {
@@ -28,6 +30,10 @@ type authResponse struct {
 	TenantID string `json:"tenant_id"`
 	UserID   string `json:"user_id"`
 	APIKey   string `json:"api_key,omitempty"`
+}
+
+type verify2FARequest struct {
+	Code string `json:"code"`
 }
 
 // Helper: Generates a random API key and its SHA-256 hash
@@ -145,5 +151,118 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		Token:    token,
 		TenantID: tenantID,
 		UserID:   userID,
+	})
+}
+
+// 1. POST /api/v1/auth/2fa/setup (Requires Bearer JWT)
+func (h *Handler) Setup2FA(w http.ResponseWriter, r *http.Request) {
+	// Extract user ID from authenticated JWT context
+	userID, ok := jwtauth.GetUserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	// Fetch user's email
+	var email string
+	err := h.pool.QueryRow(r.Context(), "SELECT email FROM users WHERE id = $1", userID).Scan(&email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "user not found")
+		return
+	}
+	// Generate base32 secret and QR URI
+	plainSecret, uri, err := totp.GenerateEnrollment(email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate 2FA secret")
+		return
+	}
+	// Encrypt secret with AES-GCM using userID as AAD
+	encryptedSecret, err := totp.EncryptSecret(plainSecret, h.totpMasterKey, []byte(userID))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encrypt 2FA secret")
+		return
+	}
+	// Save encrypted secret in DB (totp_enabled remains false until verified)
+	_, err = h.pool.Exec(r.Context(),
+		"UPDATE users SET totp_secret_encrypted = $1 WHERE id = $2",
+		encryptedSecret, userID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store 2FA secret")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"secret":      plainSecret,
+		"otpauth_url": uri,
+	})
+}
+
+// 2. POST /api/v1/auth/2fa/enable (Requires Bearer JWT + 6-digit code)
+func (h *Handler) Enable2FA(w http.ResponseWriter, r *http.Request) {
+	userID, ok := jwtauth.GetUserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var req verify2FARequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Code) != 6 {
+		writeError(w, http.StatusBadRequest, "a 6-digit code is required")
+		return
+	}
+	// Fetch encrypted secret from DB
+	var encryptedSecret string
+	err := h.pool.QueryRow(r.Context(),
+		"SELECT totp_secret_encrypted FROM users WHERE id = $1",
+		userID,
+	).Scan(&encryptedSecret)
+	if err != nil || encryptedSecret == "" {
+		writeError(w, http.StatusBadRequest, "run 2fa/setup first")
+		return
+	}
+	// Decrypt secret
+	plainSecret, err := totp.DecryptSecret(encryptedSecret, h.totpMasterKey, []byte(userID))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to decrypt secret")
+		return
+	}
+	// Verify code (±30s window)
+	matchedStep, valid, err := totp.VerifyCode(plainSecret, req.Code, time.Now())
+	if err != nil || !valid {
+		writeError(w, http.StatusBadRequest, "invalid 2FA code")
+		return
+	}
+	// Check Redis replay guard
+	allowed, err := totp.EnforceReplayGuard(r.Context(), h.client, userID, matchedStep)
+	if err != nil || !allowed {
+		writeError(w, http.StatusBadRequest, "code already used, wait for next code")
+		return
+	}
+	// Generate 8 recovery codes
+	plainCodes, hashedCodes, err := recovery.Generate(8, h.totpMasterKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate recovery codes")
+		return
+	}
+	// Save recovery codes and activate 2FA in a single transaction
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	_, err = tx.Exec(r.Context(), "UPDATE users SET totp_enabled = true WHERE id = $1", userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to activate 2FA")
+		return
+	}
+	for _, hash := range hashedCodes {
+		_, _ = tx.Exec(r.Context(),
+			"INSERT INTO recovery_codes (user_id, code_hash) VALUES ($1, $2)",
+			userID, hash,
+		)
+	}
+	_ = tx.Commit(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "2fa_enabled",
+		"recovery_codes": plainCodes,
 	})
 }
