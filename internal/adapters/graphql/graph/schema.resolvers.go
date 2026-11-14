@@ -277,8 +277,26 @@ func (r *queryResolver) Metrics(ctx context.Context, rangeArg model.TimeRange) (
 // Billing is the resolver for the billing field.
 func (r *queryResolver) Billing(ctx context.Context) (*model.Billing, error) {
 	// panic(fmt.Errorf("not implemented: Billing - billing"))
-
-	return nil, nil
+	tenantID, err := helper(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unauthorized")
+	}
+	// 1. Fetch current month usage from Redis
+	monthKey := "metering:" + tenantID + ":" + time.Now().UTC().Format("200601")
+	used, _ := r.Client.Get(ctx, monthKey).Int()
+	// 2. Fetch tenant tier from DB
+	var tier string
+	_ = r.Pool.QueryRow(ctx, "SELECT tier FROM tenants WHERE id = $1", tenantID).Scan(&tier)
+	now := time.Now().UTC()
+	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	endOfMonth := startOfMonth.AddDate(0, 1, 0).Add(-time.Nanosecond)
+	return &model.Billing{
+		Tier:        model.Tier(tier),
+		PeriodStart: startOfMonth,
+		PeriodEnd:   endOfMonth,
+		EventsUsed:  int32(used),
+		EventsQuota: 1000, // 1,000 for FREE
+	}, nil
 }
 
 // DeliveryAttempts is the resolver for the deliveryAttempts field.
