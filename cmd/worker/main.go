@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -282,6 +283,15 @@ func main() {
 		}
 	}()
 
+	// Run flusher every 1 hour (or every 1 minute for quick testing)
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			flushHourlyUsage(context.Background(), client, pool)
+		}
+	}()
+
 	for {
 
 		// The ReadPending auto takes 2 second before calling on again
@@ -300,4 +310,42 @@ func main() {
 
 	}
 
+}
+
+// Helper: Flushes completed hour buckets from Redis into Postgres
+func flushHourlyUsage(ctx context.Context, client *redis.Client, pool *pgxpool.Pool) {
+	// Look back at the previous hour
+	prevHour := time.Now().UTC().Add(-1 * time.Hour)
+	hourBucket := prevHour.Format("2006010215")
+	redisKey := "metering:" + hourBucket
+	// 1. Fetch all tenant usage for that hour
+	usageMap, err := client.HGetAll(ctx, redisKey).Result()
+	if err != nil || len(usageMap) == 0 {
+		return // Nothing to flush
+	}
+	// 2. Persist to Postgres in a transaction
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		log.Printf("flush usage tx error: %v", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	periodTime, _ := time.Parse("2006010215", hourBucket)
+	for tenantID, countStr := range usageMap {
+		count, _ := strconv.Atoi(countStr)
+		_, err := tx.Exec(ctx, `
+			INSERT INTO tenant_usage (tenant_id, period, events_count)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (tenant_id, period)
+			DO UPDATE SET events_count = tenant_usage.events_count + EXCLUDED.events_count
+		`, tenantID, periodTime, count)
+		if err != nil {
+			log.Printf("failed to save usage for tenant %s: %v", tenantID, err)
+		}
+	}
+	if err := tx.Commit(ctx); err == nil {
+		// 3. Delete the Redis key once successfully saved to database
+		_ = client.Del(ctx, redisKey).Err()
+		log.Printf("Successfully flushed %d tenant usage records for hour %s", len(usageMap), hourBucket)
+	}
 }
