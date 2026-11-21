@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -66,7 +67,7 @@ func (q Client) EnsureGroup(ctx context.Context, group string) error {
 	err := q.client.XGroupCreateMkStream(ctx, IngressStream, group, "0").Err()
 	if err != nil {
 		// Handling the already exists case
-		if err.Error() == "BUSYGROUP Consumer Group name already exists" {
+		if strings.HasPrefix(err.Error(), "BUSYGROUP") {
 			return nil
 		}
 		return fmt.Errorf("ensure group %q: %w", group, err)
