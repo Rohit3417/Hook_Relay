@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,8 +22,10 @@ type signupRequest struct {
 }
 
 type loginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email        string `json:"email"`
+	Password     string `json:"password"`
+	TOTPCode     string `json:"totp_code,omitempty"`
+	RecoveryCode string `json:"recovery_code,omitempty"`
 }
 
 type authResponse struct {
@@ -75,10 +78,10 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Insert tenant
+	// 2. Insert tenant with STARTER tier
 	var tenantID string
 	err = h.pool.QueryRow(r.Context(),
-		"INSERT INTO tenants (name, api_key_hash) VALUES ($1, $2) RETURNING id",
+		"INSERT INTO tenants (name, api_key_hash, tier) VALUES ($1, $2, 'STARTER') RETURNING id",
 		req.TenantName, keyHash,
 	).Scan(&tenantID)
 	if err != nil {
@@ -122,36 +125,91 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Look up user by email
 	var userID, tenantID, passHash string
+	var totpEnabled bool
+	var encryptedSecret *string
 	err := h.pool.QueryRow(r.Context(),
-		"SELECT id, tenant_id, password_hash FROM users WHERE email = $1",
+		"SELECT id, tenant_id, password_hash, totp_enabled, totp_secret_encrypted FROM users WHERE email = $1",
 		req.Email,
-	).Scan(&userID, &tenantID, &passHash)
+	).Scan(&userID, &tenantID, &passHash, &totpEnabled, &encryptedSecret)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
 
-	// 2. Verify Argon2id password
 	match, err := password.Verify(req.Password, passHash)
 	if err != nil || !match {
 		writeError(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
 
-	// 3. Issue RS256 JWT
+	// --- 2FA enforcement ---
+	if totpEnabled {
+		if encryptedSecret == nil {
+			writeError(w, http.StatusInternalServerError, "2fa misconfigured")
+			return
+		}
+
+		switch {
+		case req.RecoveryCode != "":
+			ok, err := h.redeemRecoveryCode(r.Context(), userID, req.RecoveryCode)
+			if err != nil || !ok {
+				writeError(w, http.StatusUnauthorized, "invalid recovery code")
+				return
+			}
+
+		case req.TOTPCode != "":
+			plainSecret, err := totp.DecryptSecret(*encryptedSecret, h.totpMasterKey, []byte(userID))
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to verify 2fa")
+				return
+			}
+			matchedStep, valid, err := totp.VerifyCode(plainSecret, req.TOTPCode, time.Now())
+			if err != nil || !valid {
+				writeError(w, http.StatusUnauthorized, "invalid 2fa code")
+				return
+			}
+			allowed, err := totp.EnforceReplayGuard(r.Context(), h.client, userID, matchedStep)
+			if err != nil || !allowed {
+				writeError(w, http.StatusUnauthorized, "code already used")
+				return
+			}
+
+		default:
+			// Tell the client 2FA is required without issuing a token
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":         "2fa_required",
+				"totp_required": true,
+			})
+			return
+		}
+	}
+
 	token, err := jwtauth.GenerateToken(userID, tenantID, h.privateKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate token")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, authResponse{
-		Token:    token,
-		TenantID: tenantID,
-		UserID:   userID,
-	})
+	writeJSON(w, http.StatusOK, authResponse{Token: token, TenantID: tenantID, UserID: userID})
+}
+
+// redeemRecoveryCode checks the hash, consumes a code atomically, rejects already-used ones.
+func (h *Handler) redeemRecoveryCode(ctx context.Context, userID, plainCode string) (bool, error) {
+	hash, err := recovery.Hash(plainCode, h.totpMasterKey)
+	if err != nil {
+		return false, err
+	}
+
+	tag, err := h.pool.Exec(ctx,
+		`UPDATE recovery_codes SET used_at = now()
+		 WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL`,
+		userID, hash,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // 1. POST /api/v1/auth/2fa/setup (Requires Bearer JWT)

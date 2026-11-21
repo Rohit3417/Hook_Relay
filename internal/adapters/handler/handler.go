@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -38,9 +39,25 @@ type publishResponse struct {
 }
 
 const (
-	QuotaFree = 1000   // 1,000 events/month
-	QuotaPro  = 100000 // 100,000 events/month
+	TierStarter           = "STARTER"
+	TierGrowth            = "GROWTH"
+	TierEnterprise        = "ENTERPRISE"
+	QuotaStarter    int64 = 1000    // 1,000 events/month
+	QuotaGrowth     int64 = 100000  // 100,000 events/month
+	QuotaEnterprise int64 = 1000000 // 1,000,000 events/month (or -1 for unlimited)
 )
+
+// Helper: Returns quota limit based on tier
+func GetTierQuota(tier string) int64 {
+	switch strings.ToUpper(tier) {
+	case TierGrowth:
+		return QuotaGrowth
+	case TierEnterprise:
+		return QuotaEnterprise
+	default:
+		return QuotaStarter
+	}
+}
 
 func NewHandler(pool *pgxpool.Pool, client *redis.Client, queue ports.EventQueue, privateKey *rsa.PrivateKey, totpKey []byte) *Handler {
 	return &Handler{pool: pool, client: client, queue: queue, privateKey: privateKey, totpMasterKey: totpKey}
@@ -116,16 +133,23 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 
 	// Cache for future requests
 	_ = h.client.Set(ctx, redisKey, tenantID, 1*time.Hour).Err()
-	// 1. Current month bucket key for billing/quota: "metering:<tenantID>:YYYYMM"
+	// 1. Fetch tenant's tier from Redis cache (or Postgres on cache miss)
+	tierCacheKey := "tenant_tier:" + tenantID
+	tier, err := h.client.Get(ctx, tierCacheKey).Result()
+	if err != nil {
+		_ = h.pool.QueryRow(ctx, "SELECT tier FROM tenants WHERE id = $1", tenantID).Scan(&tier)
+		if tier == "" {
+			tier = TierStarter
+		}
+		_ = h.client.Set(ctx, tierCacheKey, tier, 24*time.Hour).Err()
+	}
+	// 2. Monthly bucket key: "metering:<tenantID>:YYYYMM"
 	monthKey := "metering:" + tenantID + ":" + time.Now().UTC().Format("200601")
-
-	// 2. Fetch current monthly usage from Redis
+	// 3. Check usage against the tenant's tier quota
 	currentUsage, _ := h.client.Get(ctx, monthKey).Int64()
-
-	// 3. (Optional) Check tier limit (assuming FREE for default)
-	// You can query tenant tier from Postgres or cache it in Redis
-	if currentUsage >= 1000 { // Limit for Free Tier
-		writeError(w, http.StatusTooManyRequests, "monthly event quota exceeded; upgrade to Pro")
+	quota := GetTierQuota(tier)
+	if quota != -1 && currentUsage >= quota {
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("%s quota exceeded (%d/%d events); please upgrade your plan", tier, currentUsage, quota))
 		return
 	}
 
