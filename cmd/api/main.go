@@ -5,6 +5,7 @@ import (
 	"Hook_Relay2/internal/adapters/graphql"
 	"Hook_Relay2/internal/adapters/graphql/graph"
 	"Hook_Relay2/internal/adapters/handler"
+	"Hook_Relay2/internal/adapters/logger"
 	"Hook_Relay2/internal/adapters/redisqueue"
 	"Hook_Relay2/internal/adapters/storage"
 	"context"
@@ -19,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
+	"go.uber.org/zap"
 )
 
 func main() {
@@ -91,6 +93,11 @@ func main() {
 	r.Handle("/", playground.Handler("GraphQL playground", "/query"))
 
 	port := os.Getenv("PORT")
+
+	log := logger.New()
+	defer log.Sync()
+
+	log.Info("starting API server", zap.String("port", port))
 	fmt.Printf("Listening on port : %v\n", port)
 	if err := http.ListenAndServe(":"+port, r); err != nil {
 		fmt.Printf("server error")
