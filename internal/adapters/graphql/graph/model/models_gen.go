@@ -213,20 +213,20 @@ func (e EndpointStatus) MarshalJSON() ([]byte, error) {
 type Tier string
 
 const (
-	TierFree       Tier = "FREE"
-	TierPro        Tier = "PRO"
+	TierStarter    Tier = "STARTER"
+	TierGrowth     Tier = "GROWTH"
 	TierEnterprise Tier = "ENTERPRISE"
 )
 
 var AllTier = []Tier{
-	TierFree,
-	TierPro,
+	TierStarter,
+	TierGrowth,
 	TierEnterprise,
 }
 
 func (e Tier) IsValid() bool {
 	switch e {
-	case TierFree, TierPro, TierEnterprise:
+	case TierStarter, TierGrowth, TierEnterprise:
 		return true
 	}
 	return false

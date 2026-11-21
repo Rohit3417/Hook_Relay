@@ -10,6 +10,7 @@ import (
 	jwtauth "Hook_Relay2/internal/adapters/auth/jwtAuth"
 	"Hook_Relay2/internal/adapters/graphql/dataloaders"
 	"Hook_Relay2/internal/adapters/graphql/graph/model"
+	"Hook_Relay2/internal/adapters/handler"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -19,7 +20,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	pgx "github.com/jackc/pgx/v5"
 )
 
 const contextKey = "tenant_id"
@@ -287,6 +288,12 @@ func (r *queryResolver) Billing(ctx context.Context) (*model.Billing, error) {
 	// 2. Fetch tenant tier from DB
 	var tier string
 	_ = r.Pool.QueryRow(ctx, "SELECT tier FROM tenants WHERE id = $1", tenantID).Scan(&tier)
+	if tier == "" {
+		tier = "STARTER"
+	}
+
+	quota := handler.GetTierQuota(tier)
+
 	now := time.Now().UTC()
 	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	endOfMonth := startOfMonth.AddDate(0, 1, 0).Add(-time.Nanosecond)
@@ -295,7 +302,7 @@ func (r *queryResolver) Billing(ctx context.Context) (*model.Billing, error) {
 		PeriodStart: startOfMonth,
 		PeriodEnd:   endOfMonth,
 		EventsUsed:  int32(used),
-		EventsQuota: 1000, // 1,000 for FREE
+		EventsQuota: int32(quota),
 	}, nil
 }
 
@@ -309,7 +316,7 @@ func (r *subscriptionResolver) DeliveryAttempts(ctx context.Context, endpointID 
 	if err != nil {
 		return nil, fmt.Errorf("unauthorized")
 	}
-	if endpointID == nil && *endpointID == "" {
+	if endpointID == nil || *endpointID == "" {
 		channelName = attemptsfeed.TenantChannel(tenant_id)
 	} else {
 		channelName = attemptsfeed.EndpointChannel(*endpointID)
@@ -422,7 +429,7 @@ type (
 /*
 	const contextKey = "tenant_id"
 func helper(ctx context.Context) (string, error) {
-	id, ok := ctx.Value(contextKey).(string)
+	id, ok := jwtauth.GetTenantID(ctx)
 	if !ok {
 		return "", fmt.Errorf("authentication required")
 	}

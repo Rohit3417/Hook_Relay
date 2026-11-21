@@ -3,8 +3,8 @@ scalar Time
 # ---------- Enums ----------
 
 enum Tier {
-  FREE
-  PRO
+  STARTER
+  GROWTH
   ENTERPRISE
 }
 
