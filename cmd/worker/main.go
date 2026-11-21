@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -31,6 +32,7 @@ const (
 	batchSize        = 10
 	failureThreshold = 50
 	cooldown         = 100 * time.Second
+	workerPoolSize   = 10
 )
 
 // Helper function
@@ -274,9 +276,7 @@ func main() {
 				continue
 			}
 
-			for _, event := range events {
-				handle(loopCtx, queue, consumerGroup, event, secureClient, breaker, pool, publisher)
-			}
+			processBatch(loopCtx, events, queue, consumerGroup, secureClient, breaker, pool, publisher)
 
 			// Check every 5 second for stale events
 			time.Sleep(5 * time.Second)
@@ -304,9 +304,7 @@ func main() {
 			continue
 		}
 
-		for _, event := range events {
-			handle(loopCtx, queue, consumerGroup, event, secureClient, breaker, pool, publisher)
-		}
+		processBatch(loopCtx, events, queue, consumerGroup, secureClient, breaker, pool, publisher)
 
 	}
 
@@ -348,4 +346,22 @@ func flushHourlyUsage(ctx context.Context, client *redis.Client, pool *pgxpool.P
 		_ = client.Del(ctx, redisKey).Err()
 		log.Printf("Successfully flushed %d tenant usage records for hour %s", len(usageMap), hourBucket)
 	}
+}
+
+func processBatch(ctx context.Context, events []ports.QueuedEvents, queue redisqueue.Client, group string,
+	secureClient *http.Client, breaker *circuitBreaker.Breaker, pool *pgxpool.Pool, publisher *attemptsfeed.Publisher) {
+
+	sem := make(chan struct{}, workerPoolSize)
+	var wg sync.WaitGroup
+
+	for _, event := range events {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(ev ports.QueuedEvents) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			handle(ctx, queue, group, ev, secureClient, breaker, pool, publisher)
+		}(event)
+	}
+	wg.Wait()
 }
